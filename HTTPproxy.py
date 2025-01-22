@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Tuple, Optional, Dict
 import re
 import logging
+import threading
 
 # Constants
 BUF_SIZE = 4096
@@ -115,45 +116,53 @@ def generate_http_request(
 
 # Handles a client request and sends it a response
 def handle_client(client_skt: socket):
-    req = bytearray()
+    try:
+        req = bytearray()
 
-    # TODO: is somewhat slow to check the whole buffer. We could just check the end
-    while b"\r\n\r\n" not in req:
-        new_bytes = client_skt.recv(BUF_SIZE)
-        if len(new_bytes) == 0:
+        # TODO: is somewhat slow to check the whole buffer. We could just check the end
+        while b"\r\n\r\n" not in req:
+            new_bytes = client_skt.recv(BUF_SIZE)
+            if len(new_bytes) == 0:
+                return
+            req.extend(new_bytes)
+
+        logging.debug("Parsing Request")
+        parsed = parse_request(bytes(req))
+
+        # Send the proper respose if there is an error
+        if isinstance(parsed, ParseError):
+            if parsed == ParseError.NOTIMPL:
+                logging.debug("Error: Not Implemented")
+                client_skt.sendall(NOT_IMPL_RESPOSE)
+            elif parsed == ParseError.BADREQ:
+                logging.debug("Error: Bad Request")
+                client_skt.sendall(BAD_REQUEST_RESPOSE)
             return
-        req.extend(new_bytes)
 
-    logging.debug("Parsing Request")
-    parsed = parse_request(bytes(req))
+        (host, port, path, headers) = parsed
 
-    # Send the proper respose if there is an error
-    if isinstance(parsed, ParseError):
-        if parsed == ParseError.NOTIMPL:
-            logging.debug("Error: Not Implemented")
-            client_skt.sendall(NOT_IMPL_RESPOSE)
-        elif parsed == ParseError.BADREQ:
-            logging.debug("Error: Bad Request")
-            client_skt.sendall(BAD_REQUEST_RESPOSE)
-        return
+        # Create the socket for the server
+        with socket(AF_INET, SOCK_STREAM) as server_skt:
+            server_skt.connect((host, port))
+            http_message = generate_http_request(host, port, path, headers)
+            logging.debug(f"Sending message to server:\n{http_message}")
+            server_skt.sendall(http_message)
+            logging.debug(f"Sent message")
 
-    (host, port, path, headers) = parsed
-
-    # Create the socket for the server
-    with socket(AF_INET, SOCK_STREAM) as server_skt:
-        server_skt.connect((host, port))
-        http_message = generate_http_request(host, port, path, headers)
-        logging.debug(f"Sending message to server:\n{http_message}")
-        server_skt.sendall(http_message)
-        logging.debug(f"Sent message")
-
-        resp = server_skt.recv(BUF_SIZE)
-        while len(resp) != 0:
-            logging.debug(f"Sending response to client:\n{resp}")
-            client_skt.sendall(resp)
             resp = server_skt.recv(BUF_SIZE)
+            while len(resp) != 0:
+                logging.debug(f"Sending response to client:\n{resp}")
+                client_skt.sendall(resp)
+                resp = server_skt.recv(BUF_SIZE)
 
-        logging.debug(f"Done sending request")
+            logging.debug(f"Done sending request")
+
+    except Exception as e:
+        logging.error(f"Exception: {e}")
+
+    # Make sure to close the socket
+    finally:
+        client_skt.close()
 
 
 # Start of program execution
@@ -188,17 +197,12 @@ with socket(AF_INET, SOCK_STREAM) as skt:
     skt.listen(MAX_QUEUED_CONNECTIONS)
 
     # Accept clients in a loop and process their requests
-    client_skt = None
     while True:
         try:
             (client_skt, client_addr) = skt.accept()
             logging.info("New clinet connected: %s", client_addr)
-            handle_client(client_skt)
+            thrd = threading.Thread(target=handle_client, args=[client_skt])
+            thrd.start()
 
         except Exception as e:
             logging.error(f"Exception: {e}")
-
-        # Make sure to close the client socket
-        finally:
-            if client_skt != None:
-                client_skt.close()
