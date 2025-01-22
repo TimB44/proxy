@@ -8,19 +8,21 @@ from typing import Tuple, Optional, Dict
 import re
 import logging
 
-
+# Constants
 BUF_SIZE = 4096
 MAX_QUEUED_CONNECTIONS = 10
 
+# Regex used for parsing
 # TODO: Improve regex (the /.* is not ideal)
 REQUEST_LINE_RE = re.compile(
     rb"(GET|HEAD|POST) http://([a-zA-Z\.]+)(:[0-9]+)?(/.*) HTTP/1\.0\r\n"
 )
-
 # TODO: Is the key regex correct?
 HEADERS_RE = re.compile(
     rb"([A-Za-z0-9-_.~]+)*: ([A-Za-z0-9\-_.~!#$&'()*+,/:;=?@[\] ]+)\r\n"
 )
+
+# Responses for invalid requests
 BAD_REQUEST_RESPOSE = b"HTTP/1.0 400 Bad Request\r\n"
 NOT_IMPL_RESPOSE = b"HTTP/1.0 501 Not Implemented\r\n"
 
@@ -30,6 +32,7 @@ def ctrl_c_pressed(signal, frame):
     sys.exit(0)
 
 
+# Defines the differnt possible error cases when parsing an HTTP request
 class ParseError(Enum):
     NOTIMPL = 1
     BADREQ = 2
@@ -82,7 +85,6 @@ def parse_request(
         headers[key] = value
         rest = rest[header_match.end() :]
 
-    # TODO should this be an assert or an error
     assert rest == b"\r\n"
 
     logging.debug("Done Parsing")
@@ -93,6 +95,7 @@ def parse_request(
     return (host, port, path, headers)
 
 
+# Creates an HTTP reqest in a bytes object using the given info
 def generate_http_request(
     host: str, port: int, path: str, headers: Dict[str, str]
 ) -> bytes:
@@ -110,10 +113,11 @@ def generate_http_request(
     return bytes(req)
 
 
+# Handles a client request and sends it a response
 def handle_client(client_skt: socket):
     req = bytearray()
 
-    # TODO: is somewhat slow to check the whole buffer
+    # TODO: is somewhat slow to check the whole buffer. We could just check the end
     while b"\r\n\r\n" not in req:
         new_bytes = client_skt.recv(BUF_SIZE)
         if len(new_bytes) == 0:
@@ -135,7 +139,7 @@ def handle_client(client_skt: socket):
 
     (host, port, path, headers) = parsed
 
-    # Create the socket with the server
+    # Create the socket for the server
     with socket(AF_INET, SOCK_STREAM) as server_skt:
         server_skt.connect((host, port))
         http_message = generate_http_request(host, port, path, headers)
@@ -155,7 +159,7 @@ def handle_client(client_skt: socket):
 # Start of program execution
 
 # Set log level as appropriate
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 # Parse out the command line server address and port number to listen to
 parser = OptionParser()
@@ -172,7 +176,7 @@ if port is None:
 
 logging.info("Staring Proxy")
 logging.info("Port: %d", port)
-logging.info(f"Adress: %s", address)
+logging.info(f"Address: %s", address)
 
 # Set up signal handling (ctrl-c)
 signal.signal(signal.SIGINT, ctrl_c_pressed)
