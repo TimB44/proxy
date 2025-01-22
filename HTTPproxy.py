@@ -11,11 +11,17 @@ import logging
 
 BUF_SIZE = 4096
 MAX_QUEUED_CONNECTIONS = 10
+
+# TODO: Improve regex (the /.* is not ideal)
 REQUEST_LINE_RE = re.compile(
     rb"(GET|HEAD|POST) http://([a-zA-Z\.]+)(:[0-9]+)?(/.*) HTTP/1\.0\r\n"
 )
-HEADERS_RE = re.compile(rb"([A-Za-z0-9-_.~]+)\s*:\s*([A-Za-z0-9-_.~]+)\r\n")
-BAD_REQUEST_RESPOSE = b"HTTP/1.0 400 Bad request\r\n"
+
+# TODO: Is the key regex correct?
+HEADERS_RE = re.compile(
+    rb"([A-Za-z0-9-_.~]+)*: ([A-Za-z0-9\-_.~!#$&'()*+,/:;=?@[\] ]+)\r\n"
+)
+BAD_REQUEST_RESPOSE = b"HTTP/1.0 400 Bad Request\r\n"
 NOT_IMPL_RESPOSE = b"HTTP/1.0 501 Not Implemented\r\n"
 
 
