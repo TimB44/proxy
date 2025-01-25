@@ -126,7 +126,7 @@ def generate_http_request(
     if cached:
         # Date in form: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
         http_date = cached[1].strftime("%a, %d %b %Y %H:%M:%S GMT")
-        req.extend(f"If-Modified-Since: {http_date}".encode())
+        req.extend(f"If-Modified-Since: {http_date}\r\n".encode())
 
     else:
         for key, value in headers.items():
@@ -134,7 +134,7 @@ def generate_http_request(
                 continue
             req.extend(f"{key}: {value}\r\n".encode())
 
-        req.extend("\r\n".encode())
+    req.extend("\r\n".encode())
 
     return bytes(req)
 
@@ -246,6 +246,8 @@ def handle_client(client_skt: socket):
             cached = None
         CACHE_LOCK.release()
 
+        logging.debug(f"Cache active = {cache_active}, cached = {cached}")
+
         http_message = generate_http_request(host, port, path, headers, cached)
 
         # Create the socket for the server
@@ -276,14 +278,18 @@ def handle_client(client_skt: socket):
 
             # If we have cached the object then look for a 304 or a 200 response
             elif cached is not None:
+                logging.debug("Waiting for conditional get respose")
                 resp = bytearray()
                 resp_part = server_skt.recv(BUF_SIZE)
+                logging.debug(f"Got part {resp_part}")
                 resp.extend(resp_part)
                 while len(resp_part) != 0:
                     resp_part = server_skt.recv(BUF_SIZE)
+                    logging.debug(f"Got part {resp_part}")
                     resp.extend(resp_part)
 
                 resp_as_bytes = bytes(resp)
+
                 logging.debug(f"Response from conditional get:\n{resp_as_bytes}")
 
                 if resp_as_bytes.startswith(NOT_MODIFED_RESPOSE_LINE):
