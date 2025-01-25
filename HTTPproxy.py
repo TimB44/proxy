@@ -28,7 +28,7 @@ BAD_REQUEST_RESPOSE_LINE: bytes = b"HTTP/1.0 400 Bad Request\r\n"
 NOT_IMPL_RESPOSE_LINE: bytes = b"HTTP/1.0 501 Not Implemented\r\n"
 OK_RESPOSE_LINE: bytes = b"HTTP/1.0 200 OK\r\n"
 FORBIDDEN_RESPOSE_LINE: bytes = b"HTTP/1.0 403 Forbidden\r\n"
-NOT_MODIFED_RESPOSE_LINE: bytes = b"HTTP/1.1 304 Not Modified\r\n"
+NOT_MODIFED_RESPOSE_LINE: bytes = b"HTTP/1.0 304 Not Modified\r\n"
 
 # Variables used to block specific URLs
 FILTER_LOCK: Lock = Lock()
@@ -83,7 +83,7 @@ def parse_request(
     assert match.start() == 0
 
     rest = message[match.end() :]
-    logging.debug(f"Parsing headers:\n{len(rest)}")
+    logging.debug(f"Parsing headers:\n{rest}")
 
     while rest != b"\r\n":
         header_match = HEADERS_RE.match(rest)
@@ -271,9 +271,11 @@ def handle_client(client_skt: socket):
 
                 logging.debug(f"Done sending request")
                 if cache_active:
-                    resp_as_bytes = bytes(resp)
                     CACHE_LOCK.acquire()
-                    CACHE[(host, port, path)] = (resp_as_bytes, now)
+                    logging.debug(
+                        f"CACHING host = {host}, port = {port}, path = {path} now = {now}\n resp = {resp}"
+                    )
+                    CACHE[(host, port, path)] = (bytes(resp), now)
                     CACHE_LOCK.release()
 
             # If we have cached the object then look for a 304 or a 200 response
@@ -293,8 +295,10 @@ def handle_client(client_skt: socket):
                 logging.debug(f"Response from conditional get:\n{resp_as_bytes}")
 
                 if resp_as_bytes.startswith(NOT_MODIFED_RESPOSE_LINE):
+                    logging.debug(f"Got 304 sending cached = {cached[0]}")
                     client_skt.sendall(cached[0])
                 else:
+                    logging.debug(f"Got 200 sending recived = {resp_as_bytes}")
                     client_skt.sendall(resp_as_bytes)
                     CACHE_LOCK.acquire()
                     CACHE[(host, port, path)] = (resp_as_bytes, now)
@@ -314,7 +318,7 @@ def handle_client(client_skt: socket):
 # Start of program execution
 
 # Set log level as appropriate
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 # Parse out the command line server address and port number to listen to
 parser = OptionParser()
