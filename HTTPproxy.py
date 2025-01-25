@@ -189,8 +189,10 @@ def handle_builtin(path: str) -> bool:
         FILTER_LOCK.release()
 
     else:
+        logging.debug("Path %s not built-in", path)
         return False
 
+    logging.debug("Path %s is built-in", path)
     return True
 
 
@@ -221,13 +223,14 @@ def handle_client(client_skt: socket):
 
         (host, port, path, headers) = parsed
 
-        # TODO: should I add the port in this way or not?
-        if handle_builtin(path + ":" + str(port)):
+        if handle_builtin(path):
             client_skt.sendall(OK_RESPOSE_LINE + b"\r\n")
             return
 
         FILTER_LOCK.acquire()
-        blocked = FILTER_ACTIVE and any(p in host for p in FILTER_PATTERNS)
+        # TODO: should I add the port in this way or not?
+        host_with_port = host + ":" + str(port)
+        blocked = FILTER_ACTIVE and any(p in host_with_port for p in FILTER_PATTERNS)
         FILTER_LOCK.release()
         logging.debug("Host: %s %s bloked", host, ("is" if blocked else "is not"))
         if blocked:
@@ -305,7 +308,7 @@ def handle_client(client_skt: socket):
 # Start of program execution
 
 # Set log level as appropriate
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 # Parse out the command line server address and port number to listen to
 parser = OptionParser()
