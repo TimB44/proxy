@@ -4,10 +4,10 @@ from optparse import OptionParser
 import sys
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from enum import Enum
-from typing import Tuple, Optional, Dict
 import re
 import logging
-import threading
+from threading import Thread, Lock
+from datetime import datetime
 
 # Constants
 BUF_SIZE = 4096
@@ -24,8 +24,22 @@ HEADERS_RE = re.compile(
 )
 
 # Responses for invalid requests
-BAD_REQUEST_RESPOSE = b"HTTP/1.0 400 Bad Request\r\n"
-NOT_IMPL_RESPOSE = b"HTTP/1.0 501 Not Implemented\r\n"
+BAD_REQUEST_RESPOSE: bytes = b"HTTP/1.0 400 Bad Request\r\n"
+NOT_IMPL_RESPOSE: bytes = b"HTTP/1.0 501 Not Implemented\r\n"
+OK_RESPOSE: bytes = b"HTTP/1.0 200 OK\r\n"
+FORBIDDEN_RESPOSE: bytes = b"HTTP/1.0 403 Forbidden\r\n"
+NOT_MODIFED_RESPOSE: bytes = b"HTTP/1.1 304 Not Modified\r\n"
+
+# Variables used to block specific URLs
+FILTER_LOCK: Lock = Lock()
+FILTER_ACTIVE: bool = False
+FILTER_PATTERNS: set[str] = set()
+
+# Variables used for caching
+CACHE_LOCK: Lock = Lock()
+CACHE_ACTIVE: bool = False
+# Maps (host, port, path) to (response, timestamp of when response was received)
+CACHE: dict[tuple[str, int, str], tuple[bytes, datetime]] = {}
 
 
 # Signal handler for pressing ctrl-c
@@ -33,17 +47,17 @@ def ctrl_c_pressed(signal, frame):
     sys.exit(0)
 
 
-# Defines the differnt possible error cases when parsing an HTTP request
+# Defines the different possible error cases when parsing an HTTP request
 class ParseError(Enum):
     NOTIMPL = 1
     BADREQ = 2
 
 
 # Parses the given bytes as a http request.
-# Return an error or a tupele of (Host, Port, Path, Headers)
+# Return an error or a tuple of (Host, Port, Path, Headers)
 def parse_request(
     message: bytes,
-) -> ParseError | Tuple[str, int, str, Dict[str, str]]:
+) -> ParseError | tuple[str, int, str, dict[str, str]]:
     logging.debug(f"Parsing request:\n{message}")
     match = REQUEST_LINE_RE.match(message)
     if match == None:
@@ -65,7 +79,7 @@ def parse_request(
     path = match.group(4).decode()
     assert isinstance(path, str)
 
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
     assert match.start() == 0
 
     rest = message[match.end() :]
@@ -96,22 +110,88 @@ def parse_request(
     return (host, port, path, headers)
 
 
-# Creates an HTTP reqest in a bytes object using the given info
+# Creates an HTTP request in a bytes object using the given info
 def generate_http_request(
-    host: str, port: int, path: str, headers: Dict[str, str]
+    host: str,
+    port: int,
+    path: str,
+    headers: dict[str, str],
+    cached: tuple[bytes, datetime] | None,
 ) -> bytes:
     req = bytearray()
     req.extend(f"GET {path} HTTP/1.0\r\n".encode())
     req.extend(f"Host: {host}:{port}\r\n".encode())
     req.extend(f"Connection: close\r\n".encode())
-    for key, value in headers.items():
-        if key == "Connection":
-            continue
-        req.extend(f"{key}: {value}\r\n".encode())
 
-    req.extend("\r\n".encode())
+    if cached:
+        # Date in form: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
+        http_date = cached[1].strftime("%a, %d %b %Y %H:%M:%S GMT")
+        req.extend(f"If-Modified-Since: {http_date}".encode())
+
+    else:
+        for key, value in headers.items():
+            if key == "Connection":
+                continue
+            req.extend(f"{key}: {value}\r\n".encode())
+
+        req.extend("\r\n".encode())
 
     return bytes(req)
+
+
+# Handles a built in request that is used for controlling the cache and the block-list
+#
+# path: A string containing the path of the request.
+#
+# returns: True if the request was a built in, False if not
+def handle_builtin(path: str) -> bool:
+    global CACHE_ACTIVE
+    global FILTER_ACTIVE
+    if path == "/proxy/cache/enable":
+        CACHE_LOCK.acquire()
+        CACHE_ACTIVE = True
+        CACHE_LOCK.release()
+    elif path == "/proxy/cache/disable":
+        CACHE_LOCK.acquire()
+        CACHE_ACTIVE = False
+        CACHE_LOCK.release()
+    elif path == "/proxy/cache/flush":
+        CACHE_LOCK.acquire()
+        CACHE.clear()
+        CACHE_LOCK.release()
+    elif path == "/proxy/blocklist/enable":
+        FILTER_LOCK.acquire()
+        FILTER_ACTIVE = True
+        FILTER_LOCK.release()
+
+    elif path == "/proxy/blocklist/disable":
+        FILTER_LOCK.acquire()
+        FILTER_ACTIVE = False
+        FILTER_LOCK.release()
+
+    elif path.startswith("/proxy/blocklist/add/"):
+        pattern = path[len("/proxy/blocklist/add/") :]
+        logging.debug("Adding filter %s", pattern)
+        FILTER_LOCK.acquire()
+        FILTER_PATTERNS.add(pattern)
+        FILTER_LOCK.release()
+
+    elif path.startswith("/proxy/blocklist/remove/"):
+        pattern = path[len("/proxy/blocklist/remove/") :]
+        logging.debug("Removing filter %s", pattern)
+        FILTER_LOCK.acquire()
+        FILTER_PATTERNS.discard(pattern)
+        FILTER_LOCK.release()
+
+    elif path == "/proxy/blocklist/flush":
+        FILTER_LOCK.acquire()
+        FILTER_PATTERNS.clear()
+        FILTER_LOCK.release()
+
+    else:
+        return False
+
+    return True
 
 
 # Handles a client request and sends it a response
@@ -129,7 +209,7 @@ def handle_client(client_skt: socket):
         logging.debug("Parsing Request")
         parsed = parse_request(bytes(req))
 
-        # Send the proper respose if there is an error
+        # Send the proper response if there is an error
         if isinstance(parsed, ParseError):
             if parsed == ParseError.NOTIMPL:
                 logging.debug("Error: Not Implemented")
@@ -141,21 +221,77 @@ def handle_client(client_skt: socket):
 
         (host, port, path, headers) = parsed
 
+        # TODO: should I add the port in this way or not?
+        if handle_builtin(path + ":" + str(port)):
+            return
+
+        FILTER_LOCK.acquire()
+        blocked = FILTER_ACTIVE and any(p in host for p in FILTER_PATTERNS)
+        FILTER_LOCK.release()
+        logging.debug("Host: %s %s bloked", host, ("is" if blocked else "is not"))
+        if blocked:
+            logging.debug("Sending 403 Forbin For blocked host: %s", host)
+            client_skt.sendall(FORBIDDEN_RESPOSE)
+            return
+
+        CACHE_LOCK.acquire()
+        cache_active = CACHE_ACTIVE
+        if cache_active:
+            cached = CACHE.get((host, port, path))
+        else:
+            cached = None
+        CACHE_LOCK.release()
+
+        http_message = generate_http_request(host, port, path, headers, cached)
+
         # Create the socket for the server
         with socket(AF_INET, SOCK_STREAM) as server_skt:
             server_skt.connect((host, port))
-            http_message = generate_http_request(host, port, path, headers)
             logging.debug(f"Sending message to server:\n{http_message}")
+            now = datetime.now()
             server_skt.sendall(http_message)
             logging.debug(f"Sent message")
 
-            resp = server_skt.recv(BUF_SIZE)
-            while len(resp) != 0:
-                logging.debug(f"Sending response to client:\n{resp}")
-                client_skt.sendall(resp)
-                resp = server_skt.recv(BUF_SIZE)
+            # Send a normal request if the cache is off or the item in not cached
+            if not cache_active or cached is None:
+                resp = bytearray()
+                resp_part = server_skt.recv(BUF_SIZE)
+                resp.extend(resp_part)
+                while len(resp_part) != 0:
+                    logging.debug(f"Sending response to client:\n{resp_part}")
+                    client_skt.sendall(resp_part)
+                    resp_part = server_skt.recv(BUF_SIZE)
+                    resp.extend(resp_part)
 
-            logging.debug(f"Done sending request")
+                logging.debug(f"Done sending request")
+                if cache_active:
+                    resp_as_bytes = bytes(resp)
+                    CACHE_LOCK.acquire()
+                    CACHE[(host, port, path)] = (resp_as_bytes, now)
+                    CACHE_LOCK.release()
+
+            # If we have cached the object then look for a 304 or a 200 response
+            elif cached is not None:
+                resp = bytearray()
+                resp_part = server_skt.recv(BUF_SIZE)
+                resp.extend(resp_part)
+                while len(resp_part) != 0:
+                    resp_part = server_skt.recv(BUF_SIZE)
+                    resp.extend(resp_part)
+
+                resp_as_bytes = bytes(resp)
+                logging.debug(f"Response from conditional get:\n{resp_as_bytes}")
+
+                if resp_as_bytes.startswith(NOT_MODIFED_RESPOSE):
+                    client_skt.sendall(cached[0])
+                else:
+                    client_skt.sendall(resp_as_bytes)
+                    CACHE_LOCK.acquire()
+                    CACHE[(host, port, path)] = (resp_as_bytes, now)
+                    CACHE_LOCK.release()
+
+            else:
+                assert False, "Code should be unreachable"
 
     except Exception as e:
         logging.error(f"Exception: {e}")
@@ -201,7 +337,7 @@ with socket(AF_INET, SOCK_STREAM) as skt:
         try:
             (client_skt, client_addr) = skt.accept()
             logging.info("New clinet connected: %s", client_addr)
-            thrd = threading.Thread(target=handle_client, args=[client_skt])
+            thrd = Thread(target=handle_client, args=[client_skt])
             thrd.start()
 
         except Exception as e:
