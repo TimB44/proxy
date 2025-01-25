@@ -1,4 +1,15 @@
-# Place your imports here
+# HTTP 1.0 Proxy
+# Author: Tim Blamires
+#
+# This program acts a simple HTTP 1.0 Proxy with support for caching and
+# filtering.
+#
+# All networking is done using the socket interface.
+#
+# Regular expressions are used to parse the HTTP request.
+#
+# The Threading module is used to execute client requests concurrently, and
+# locks are used to ensure no data races exist
 import signal
 from optparse import OptionParser
 import sys
@@ -14,16 +25,15 @@ BUF_SIZE = 4096
 MAX_QUEUED_CONNECTIONS = 10
 
 # Regex used for parsing
-# TODO: Improve regex (the /.* is not ideal)
 REQUEST_LINE_RE = re.compile(
     rb"(GET|HEAD|POST) http://([a-zA-Z\.]+)(:[0-9]+)?(/.*) HTTP/1\.0\r\n"
 )
-# TODO: Is the key regex correct?
+
 HEADERS_RE = re.compile(
     rb"([A-Za-z0-9-_.~]+)*: ([A-Za-z0-9\-_.~!#$&'()*+,/:;=?@[\] ]+)\r\n"
 )
 
-# Responses for invalid requests
+# Responses lines
 BAD_REQUEST_RESPOSE_LINE: bytes = b"HTTP/1.0 400 Bad Request\r\n"
 NOT_IMPL_RESPOSE_LINE: bytes = b"HTTP/1.0 501 Not Implemented\r\n"
 OK_RESPOSE_LINE: bytes = b"HTTP/1.0 200 OK\r\n"
@@ -140,10 +150,7 @@ def generate_http_request(
 
 
 # Handles a built in request that is used for controlling the cache and the block-list
-#
-# path: A string containing the path of the request.
-#
-# returns: True if the request was a built in, False if not
+# Returns true if the request was a built in, false if not
 def handle_builtin(path: str) -> bool:
     global CACHE_ACTIVE
     global FILTER_ACTIVE
@@ -197,6 +204,7 @@ def handle_builtin(path: str) -> bool:
 
 
 # Handles a client request and sends it a response
+# client_skt should be an open socket connected to the client
 def handle_client(client_skt: socket):
     try:
         req = bytearray()
@@ -228,7 +236,6 @@ def handle_client(client_skt: socket):
             return
 
         FILTER_LOCK.acquire()
-        # TODO: should I add the port in this way or not?
         host_with_port = host + ":" + str(port)
         blocked = FILTER_ACTIVE and any(p in host_with_port for p in FILTER_PATTERNS)
         FILTER_LOCK.release()
@@ -318,7 +325,7 @@ def handle_client(client_skt: socket):
 # Start of program execution
 
 # Set log level as appropriate
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 # Parse out the command line server address and port number to listen to
 parser = OptionParser()
@@ -351,6 +358,8 @@ with socket(AF_INET, SOCK_STREAM) as skt:
         try:
             (client_skt, client_addr) = skt.accept()
             logging.info("New clinet connected: %s", client_addr)
+
+            # Spawn a new thread to handle the client
             thrd = Thread(target=handle_client, args=[client_skt])
             thrd.start()
 
