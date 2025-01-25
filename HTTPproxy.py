@@ -24,11 +24,11 @@ HEADERS_RE = re.compile(
 )
 
 # Responses for invalid requests
-BAD_REQUEST_RESPOSE: bytes = b"HTTP/1.0 400 Bad Request\r\n"
-NOT_IMPL_RESPOSE: bytes = b"HTTP/1.0 501 Not Implemented\r\n"
-OK_RESPOSE: bytes = b"HTTP/1.0 200 OK\r\n"
-FORBIDDEN_RESPOSE: bytes = b"HTTP/1.0 403 Forbidden\r\n"
-NOT_MODIFED_RESPOSE: bytes = b"HTTP/1.1 304 Not Modified\r\n"
+BAD_REQUEST_RESPOSE_LINE: bytes = b"HTTP/1.0 400 Bad Request\r\n"
+NOT_IMPL_RESPOSE_LINE: bytes = b"HTTP/1.0 501 Not Implemented\r\n"
+OK_RESPOSE_LINE: bytes = b"HTTP/1.0 200 OK\r\n"
+FORBIDDEN_RESPOSE_LINE: bytes = b"HTTP/1.0 403 Forbidden\r\n"
+NOT_MODIFED_RESPOSE_LINE: bytes = b"HTTP/1.1 304 Not Modified\r\n"
 
 # Variables used to block specific URLs
 FILTER_LOCK: Lock = Lock()
@@ -213,16 +213,17 @@ def handle_client(client_skt: socket):
         if isinstance(parsed, ParseError):
             if parsed == ParseError.NOTIMPL:
                 logging.debug("Error: Not Implemented")
-                client_skt.sendall(NOT_IMPL_RESPOSE)
+                client_skt.sendall(NOT_IMPL_RESPOSE_LINE + b"\r\n")
             elif parsed == ParseError.BADREQ:
                 logging.debug("Error: Bad Request")
-                client_skt.sendall(BAD_REQUEST_RESPOSE)
+                client_skt.sendall(BAD_REQUEST_RESPOSE_LINE + b"\r\n")
             return
 
         (host, port, path, headers) = parsed
 
         # TODO: should I add the port in this way or not?
         if handle_builtin(path + ":" + str(port)):
+            client_skt.sendall(OK_RESPOSE_LINE + b"\r\n")
             return
 
         FILTER_LOCK.acquire()
@@ -231,7 +232,7 @@ def handle_client(client_skt: socket):
         logging.debug("Host: %s %s bloked", host, ("is" if blocked else "is not"))
         if blocked:
             logging.debug("Sending 403 Forbin For blocked host: %s", host)
-            client_skt.sendall(FORBIDDEN_RESPOSE)
+            client_skt.sendall(FORBIDDEN_RESPOSE_LINE + b"\r\n")
             return
 
         CACHE_LOCK.acquire()
@@ -282,7 +283,7 @@ def handle_client(client_skt: socket):
                 resp_as_bytes = bytes(resp)
                 logging.debug(f"Response from conditional get:\n{resp_as_bytes}")
 
-                if resp_as_bytes.startswith(NOT_MODIFED_RESPOSE):
+                if resp_as_bytes.startswith(NOT_MODIFED_RESPOSE_LINE):
                     client_skt.sendall(cached[0])
                 else:
                     client_skt.sendall(resp_as_bytes)
