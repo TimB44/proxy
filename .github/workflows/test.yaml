@@ -1,0 +1,16 @@
+name: test
+on: 
+  push:
+
+
+jobs:
+  Test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: test
+        env:
+          COMMITS: ${{ toJSON(github.event) }}
+        run: |
+          echo $COMMITS
+
+
